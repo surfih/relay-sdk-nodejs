@@ -1,0 +1,29 @@
+# Prevent npm from falling back to .gitignore (which excludes dist/).
+# package.json "files" already allowlists dist; this keeps the tarball lean.
+
+# Source & tests (not shipped; consumers use dist/)
+src/
+test/
+dist-test/
+tsconfig.json
+tsconfig.*.json
+
+# Dev / local
+node_modules/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/
+.eslintcache
+.cache/
+.tmp/
+temp/
+
+# Pack artifacts
+*.tgz
+.npm/
