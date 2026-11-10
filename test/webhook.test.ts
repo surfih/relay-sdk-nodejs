@@ -5,6 +5,8 @@ import { WebhookVerificationError, verifyWebhook } from "../src/index.js";
 
 const API_KEY = "ak_live_test";
 const SECRET = "cs_live_webhook_secret_value";
+const TIMESTAMP = "1700000000";
+const NOW_MS = 1_700_000_000_000;
 
 function delivery(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -18,18 +20,26 @@ function delivery(over: Record<string, unknown> = {}): string {
   });
 }
 
-function hmac(raw: Uint8Array, apiKey = API_KEY): string {
-  return `sha256=${createHmac("sha256", SECRET).update(apiKey).update(".").update(raw).digest("hex")}`;
+function hmac(raw: Uint8Array, timestamp = TIMESTAMP, apiKey = API_KEY): string {
+  return `sha256=${createHmac("sha256", SECRET)
+    .update(apiKey)
+    .update(".")
+    .update(timestamp)
+    .update(".")
+    .update(raw)
+    .digest("hex")}`;
 }
 
 function headersFor(
   raw: Uint8Array,
   extra: Record<string, string | string[]> = {},
   apiKey = API_KEY,
+  timestamp = TIMESTAMP,
 ): Record<string, string | string[]> {
   return {
     "X-API-Key": ` ${apiKey} `,
-    "X-Payload-Signature": hmac(raw, apiKey),
+    "X-Timestamp": ` ${timestamp} `,
+    "X-Payload-Signature": hmac(raw, timestamp, apiKey),
     "Idempotency-Key": " order-1 ",
     "X-Event-Id": " evt_1 ",
     "X-Event-Attempt": " 1 ",
@@ -49,10 +59,25 @@ function assertNoSecrets(err: unknown, secrets: readonly string[]): void {
   for (const secret of secrets) assert.equal(blob.includes(secret), false);
 }
 
+function verifyOpts(
+  raw: string | Uint8Array,
+  headers: Record<string, string | string[]>,
+  over: Record<string, unknown> = {},
+) {
+  return {
+    apiKey: API_KEY,
+    secret: SECRET,
+    rawBody: raw,
+    headers,
+    now: () => NOW_MS,
+    ...over,
+  };
+}
+
 test("verifies a good delivery and trims headers", () => {
   const raw = delivery();
   const bytes = new TextEncoder().encode(raw);
-  const verified = verifyWebhook({ apiKey: API_KEY, secret: SECRET, rawBody: raw, headers: headersFor(bytes) });
+  const verified = verifyWebhook(verifyOpts(raw, headersFor(bytes)));
   assert.equal(verified.eventId, "evt_1");
   assert.equal(verified.queueId, "que_1");
   assert.equal(verified.attempt, 1);
@@ -63,12 +88,9 @@ test("verifies a good delivery and trims headers", () => {
 test("a swapped Idempotency-Key still verifies", () => {
   const raw = delivery();
   const bytes = new TextEncoder().encode(raw);
-  const verified = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: bytes,
-    headers: headersFor(bytes, { "Idempotency-Key": "swapped-key" }),
-  });
+  const verified = verifyWebhook(
+    verifyOpts(bytes, headersFor(bytes, { "Idempotency-Key": "swapped-key" })),
+  );
   assert.equal(verified.idempotencyKey, "swapped-key");
   assert.equal(verified.eventId, "evt_1");
   assert.equal(verified.attempt, 1);
@@ -80,7 +102,7 @@ test("bad signatures fail closed and do not reveal the secret or expected MAC", 
   const expected = hmac(bytes);
   const headers = headersFor(bytes, { "X-Payload-Signature": "sha256=" + "ab".repeat(32) });
   assert.throws(
-    () => verifyWebhook({ apiKey: API_KEY, secret: SECRET, rawBody: bytes, headers }),
+    () => verifyWebhook(verifyOpts(bytes, headers)),
     (err: unknown) => {
       assert.equal(err instanceof WebhookVerificationError, true);
       assert.equal((err as WebhookVerificationError).reason, "signature");
@@ -91,17 +113,14 @@ test("bad signatures fail closed and do not reveal the secret or expected MAC", 
   );
 
   assert.throws(
-    () => verifyWebhook({ apiKey: API_KEY, secret: SECRET, rawBody: bytes, headers: headersFor(bytes, {}, "ak_live_other") }),
+    () => verifyWebhook(verifyOpts(bytes, headersFor(bytes, {}, "ak_live_other"))),
     (err: unknown) => (err as WebhookVerificationError).reason === "signature",
   );
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-API-Key": "short" }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-API-Key": "short" })),
+      ),
     (err: unknown) => err instanceof WebhookVerificationError && (err as WebhookVerificationError).reason === "signature",
   );
 });
@@ -111,31 +130,22 @@ test("multi-value headers fail and a single-element array is accepted", () => {
   const bytes = new TextEncoder().encode(raw);
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "Idempotency-Key": ["order-1", "other"] }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "Idempotency-Key": ["order-1", "other"] })),
+      ),
     (err: unknown) => (err as WebhookVerificationError).reason === "headers",
   );
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-API-Key": [API_KEY, "ak_live_other"] }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-API-Key": [API_KEY, "ak_live_other"] })),
+      ),
     (err: unknown) => (err as WebhookVerificationError).reason === "headers",
   );
 
-  const verified = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: bytes,
-    headers: headersFor(bytes, { "Idempotency-Key": [" order-1 "] }),
-  });
+  const verified = verifyWebhook(
+    verifyOpts(bytes, headersFor(bytes, { "Idempotency-Key": [" order-1 "] })),
+  );
   assert.equal(verified.idempotencyKey, "order-1");
 });
 
@@ -143,7 +153,7 @@ test("invalid JSON after a good MAC is a body error and a bad MAC wins first", (
   const marker = "NOT_JSON_SECRET_MARKER";
   const bytes = new TextEncoder().encode(marker);
   assert.throws(
-    () => verifyWebhook({ apiKey: API_KEY, secret: SECRET, rawBody: bytes, headers: headersFor(bytes) }),
+    () => verifyWebhook(verifyOpts(bytes, headersFor(bytes))),
     (err: unknown) => {
       assert.equal((err as WebhookVerificationError).reason, "body");
       assert.equal((err as WebhookVerificationError).message, "webhook body is invalid");
@@ -153,12 +163,9 @@ test("invalid JSON after a good MAC is a body error and a bad MAC wins first", (
   );
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-Payload-Signature": "sha256=" + "cd".repeat(32) }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-Payload-Signature": "sha256=" + "cd".repeat(32) })),
+      ),
     (err: unknown) => (err as WebhookVerificationError).reason === "signature",
   );
 });
@@ -168,12 +175,9 @@ test("identity mismatches use reason mismatch", () => {
   const bytes = new TextEncoder().encode(raw);
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-Event-Id": "evt_other" }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-Event-Id": "evt_other" })),
+      ),
     (err: unknown) => {
       assert.equal((err as WebhookVerificationError).reason, "mismatch");
       assert.equal((err as WebhookVerificationError).message, "webhook payload does not match signed headers");
@@ -183,116 +187,131 @@ test("identity mismatches use reason mismatch", () => {
   );
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-Event-Attempt": "2" }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-Event-Attempt": "2" })),
+      ),
     (err: unknown) => (err as WebhookVerificationError).reason === "mismatch",
   );
   assert.throws(
     () =>
-      verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: bytes,
-        headers: headersFor(bytes, { "X-Queue-Id": "que_other" }),
-      }),
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-Queue-Id": "que_other" })),
+      ),
     (err: unknown) => (err as WebhookVerificationError).reason === "mismatch",
   );
 
   const fractional = new TextEncoder().encode(delivery({ attempt: 1.5 }));
   assert.throws(
-    () => verifyWebhook({ apiKey: API_KEY, secret: SECRET, rawBody: fractional, headers: headersFor(fractional) }),
+    () => verifyWebhook(verifyOpts(fractional, headersFor(fractional))),
     (err: unknown) => (err as WebhookVerificationError).reason === "body",
   );
 });
 
-test("HMAC-only verification ignores a stale delivery timestamp", () => {
+test("HMAC verification requires a fresh X-Timestamp and ignores a stale X-Event-Timestamp", () => {
   const raw = delivery();
   const bytes = new TextEncoder().encode(raw);
-  const verified = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: bytes,
-    headers: headersFor(bytes, { "X-Event-Timestamp": "1" }),
-    now: () => Date.now(),
-  });
+
+  const verified = verifyWebhook(
+    verifyOpts(bytes, headersFor(bytes, { "X-Event-Timestamp": "1" })),
+  );
   assert.equal(verified.attempt, 1);
+
+  assert.throws(
+    () =>
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, {}, API_KEY, "1"), {
+          now: () => Date.now(),
+        }),
+      ),
+    (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
+  );
+
+  assert.throws(
+    () =>
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes), {
+          now: () => (1_700_000_000 + 301) * 1000,
+        }),
+      ),
+    (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
+  );
+
+  const edge = verifyWebhook(
+    verifyOpts(bytes, headersFor(bytes), {
+      now: () => (1_700_000_000 + 300) * 1000,
+    }),
+  );
+  assert.equal(edge.attempt, 1);
+
+  assert.throws(
+    () =>
+      verifyWebhook(
+        verifyOpts(bytes, headersFor(bytes, { "X-Timestamp": "12ab" }, API_KEY, "12ab")),
+      ),
+    (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
+  );
+
+  const { "X-Timestamp": _ignored, ...missingTs } = headersFor(bytes);
+  void _ignored;
+  assert.throws(
+    () => verifyWebhook(verifyOpts(bytes, missingTs)),
+    (err: unknown) => (err as WebhookVerificationError).reason === "headers",
+  );
 });
 
 test("Ed25519 delivery signature enforces the v1 message and ±300s skew", () => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const publicPem = pemText(publicKey.export({ type: "spki", format: "pem" }));
   const raw = new TextEncoder().encode(delivery());
-  const timestamp = "1700000000";
+  const timestamp = TIMESTAMP;
 
   const verified = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: raw,
-    headers: deliveryHeaders(raw, privateKey, timestamp),
+    ...verifyOpts(raw, deliveryHeaders(raw, privateKey, timestamp)),
     deliveryPublicKeyPem: publicPem,
-    now: () => 1_700_000_000_000,
   });
   assert.equal(verified.eventId, "evt_1");
 
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: deliveryHeaders(raw, privateKey, timestamp),
+        ...verifyOpts(raw, deliveryHeaders(raw, privateKey, timestamp), {
+          now: () => (1_700_000_000 + 301) * 1000,
+        }),
         deliveryPublicKeyPem: publicPem,
-        now: () => (1_700_000_000 + 301) * 1000,
       }),
     (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
   );
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: deliveryHeaders(raw, privateKey, timestamp),
+        ...verifyOpts(raw, deliveryHeaders(raw, privateKey, timestamp), {
+          now: () => (1_700_000_000 - 301) * 1000,
+        }),
         deliveryPublicKeyPem: publicPem,
-        now: () => (1_700_000_000 - 301) * 1000,
       }),
     (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
   );
 
   const edge = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: raw,
-    headers: deliveryHeaders(raw, privateKey, timestamp),
+    ...verifyOpts(raw, deliveryHeaders(raw, privateKey, timestamp), {
+      now: () => (1_700_000_000 + 300) * 1000,
+    }),
     deliveryPublicKeyPem: publicPem,
-    now: () => (1_700_000_000 + 300) * 1000,
   });
   assert.equal(edge.attempt, 1);
 
   const paddedTime = "01700000000";
   const padded = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: raw,
-    headers: deliveryHeaders(raw, privateKey, paddedTime),
+    ...verifyOpts(raw, deliveryHeaders(raw, privateKey, paddedTime, TIMESTAMP)),
     deliveryPublicKeyPem: publicPem,
-    now: () => 1_700_000_000_000,
   });
   assert.equal(padded.eventId, "evt_1");
 
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: deliveryHeaders(raw, privateKey, "12ab"),
+        ...verifyOpts(raw, deliveryHeaders(raw, privateKey, "12ab")),
         deliveryPublicKeyPem: publicPem,
-        now: () => 1_700_000_000_000,
       }),
     (err: unknown) => (err as WebhookVerificationError).reason === "timestamp",
   );
@@ -302,12 +321,8 @@ test("Ed25519 delivery signature enforces the v1 message and ±300s skew", () =>
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: badSig,
+        ...verifyOpts(raw, badSig),
         deliveryPublicKeyPem: publicPem,
-        now: () => 1_700_000_000_000,
       }),
     (err: unknown) => (err as WebhookVerificationError).reason === "delivery",
   );
@@ -317,12 +332,8 @@ test("Ed25519 delivery signature enforces the v1 message and ±300s skew", () =>
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: missingKey,
+        ...verifyOpts(raw, missingKey),
         deliveryPublicKeyPem: publicPem,
-        now: () => 1_700_000_000_000,
       }),
     (err: unknown) => (err as WebhookVerificationError).reason === "headers",
   );
@@ -336,16 +347,15 @@ test("a private key PEM is not a delivery public key and is not echoed", () => {
   assert.throws(
     () =>
       verifyWebhook({
-        apiKey: API_KEY,
-        secret: SECRET,
-        rawBody: raw,
-        headers: headersFor(raw, {
-          "X-Event-Timestamp": "1700000000",
-          "X-Event-Key-Id": "whk_1",
-          "X-Event-Signature": "ed25519=" + "A".repeat(86) + "==",
-        }),
+        ...verifyOpts(
+          raw,
+          headersFor(raw, {
+            "X-Event-Timestamp": TIMESTAMP,
+            "X-Event-Key-Id": "whk_1",
+            "X-Event-Signature": "ed25519=" + "A".repeat(86) + "==",
+          }),
+        ),
         deliveryPublicKeyPem: privatePem,
-        now: () => 1_700_000_000_000,
       }),
     (err: unknown) => {
       assert.equal((err as WebhookVerificationError).reason, "delivery");
@@ -363,21 +373,26 @@ test("hashes a Uint8Array view of the raw body", () => {
   padded[padded.length - 1] = 0x22;
   padded.set(raw, 1);
   const view = padded.subarray(1, 1 + raw.length);
-  const verified = verifyWebhook({
-    apiKey: API_KEY,
-    secret: SECRET,
-    rawBody: view,
-    headers: headersFor(view),
-  });
+  const verified = verifyWebhook(verifyOpts(view, headersFor(view)));
   assert.equal(verified.body.event_id, "evt_1");
 });
 
-function deliveryHeaders(raw: Uint8Array, privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"], timestamp: string) {
-  return headersFor(raw, {
-    "X-Event-Timestamp": timestamp,
-    "X-Event-Key-Id": " whk_1 ",
-    "X-Event-Signature": signDelivery(privateKey, timestamp, "evt_1", raw),
-  });
+function deliveryHeaders(
+  raw: Uint8Array,
+  privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"],
+  eventTimestamp: string,
+  hmacTimestamp = TIMESTAMP,
+) {
+  return headersFor(
+    raw,
+    {
+      "X-Event-Timestamp": eventTimestamp,
+      "X-Event-Key-Id": " whk_1 ",
+      "X-Event-Signature": signDelivery(privateKey, eventTimestamp, "evt_1", raw),
+    },
+    API_KEY,
+    hmacTimestamp,
+  );
 }
 
 function signDelivery(

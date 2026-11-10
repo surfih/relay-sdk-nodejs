@@ -117,9 +117,23 @@ export function hmacSha256Header(secret: string, message: Uint8Array): string {
   return `sha256=${hex}`;
 }
 
-/** Webhook HMAC over `apiKey + "." + rawBody` as three updates. `rawBody` may be a view. */
-export function webhookHmacHeader(secret: string, apiKey: string, rawBody: Uint8Array): string {
-  const hex = createHmac("sha256", secret).update(apiKey).update(".").update(rawBody).digest("hex");
+/**
+ * Webhook HMAC over `apiKey + "." + timestamp + "." + rawBody` as five updates.
+ * `rawBody` may be a view.
+ */
+export function webhookHmacHeader(
+  secret: string,
+  apiKey: string,
+  timestamp: string,
+  rawBody: Uint8Array,
+): string {
+  const hex = createHmac("sha256", secret)
+    .update(apiKey)
+    .update(".")
+    .update(timestamp)
+    .update(".")
+    .update(rawBody)
+    .digest("hex");
   return `sha256=${hex}`;
 }
 

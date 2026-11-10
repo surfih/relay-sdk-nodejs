@@ -61,6 +61,42 @@ await relay.events.submit(
   { idempotencyKey: "order-ord_1" },
 );
 
+// Throttle: same key can fire again after the previous run closes.
+await relay.events.submit(
+  queueId,
+  {
+    event_type: "notify.user",
+    event: { user_id: "42" },
+    delay_seconds: 60,
+    key_mode: "throttle",
+  },
+  { idempotencyKey: "notify-user-42" },
+);
+
+// Debounce: while idle, each submit replaces the payload and reschedules.
+await relay.events.submit(
+  queueId,
+  {
+    event_type: "search.index",
+    event: { doc_id: "d1", rev: 2 },
+    delay_seconds: 5,
+    key_mode: "debounce",
+  },
+  { idempotencyKey: "index-d1" },
+);
+
+// Batch: accumulate payloads; webhook receives `submissions`.
+await relay.events.submit(
+  queueId,
+  {
+    event_type: "search.index",
+    event: { doc_id: "d1", rev: 3 },
+    delay_seconds: 5,
+    key_mode: "batch",
+  },
+  { idempotencyKey: "index-d1" },
+);
+
 const event = await relay.events.get(accepted.event_id);
 const withAttempts = await relay.events.get(accepted.event_id, { attempts: true });
 // withAttempts.attempts, withAttempts.checkpoints
@@ -77,7 +113,7 @@ await relay.events.checkpoints(accepted.event_id, [
 ]);
 ```
 
-`send_message` events must carry only `{ notification_id }` in `event`.
+`key_mode` is `once` (default), `throttle`, `debounce`, or `batch`. `send_message` events must carry only `{ notification_id }` in `event`.
 
 ### Schedules
 
@@ -131,7 +167,7 @@ delivery.attempt;
 delivery.idempotencyKey;
 ```
 
-`Idempotency-Key` is unsigned. A request with that header swapped still verifies. Dedupe on the signed pair `(event_id, attempt)` as well as on the idempotency key. When `deliveryPublicKeyPem` is set, the Ed25519 signature covers `v1.{timestamp}.{eventId}.{sha256_hex(body)}` and the timestamp must be within ±300 seconds. HMAC-only deliveries have no timestamp.
+`Idempotency-Key` is unsigned. A request with that header swapped still verifies. Dedupe on the signed pair `(event_id, attempt)` as well as on the idempotency key. Every delivery must include a fresh `X-Timestamp` (±300 s); the HMAC covers `apiKey.timestamp.rawBody`. When `deliveryPublicKeyPem` is set, the Ed25519 signature covers `v1.{timestamp}.{eventId}.{sha256_hex(body)}` and `X-Event-Timestamp` must also be within ±300 seconds.
 
 A header value that arrives as a `string[]` must contain exactly one entry.
 

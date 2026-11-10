@@ -40,11 +40,12 @@ test("HMAC request vector is locked", () => {
   );
 });
 
-test("webhook HMAC vector uses three updates and respects Uint8Array views", () => {
+test("webhook HMAC vector uses five updates and respects Uint8Array views", () => {
   const raw = new TextEncoder().encode('{"event_id":"evt_1"}');
+  const timestamp = "1700000000";
   assert.equal(
-    webhookHmacHeader(SECRET, API_KEY, raw),
-    "sha256=534b025e6e25dfadee464c0544bc559237e64c7accd3dcde8f932d9efbd0691d",
+    webhookHmacHeader(SECRET, API_KEY, timestamp, raw),
+    "sha256=d65676f920079ade2fc4491284af46cb0fb1192079cc6727f431e8ad69f71972",
   );
 
   const padded = new Uint8Array(raw.length + 2);
@@ -52,8 +53,14 @@ test("webhook HMAC vector uses three updates and respects Uint8Array views", () 
   padded[padded.length - 1] = 0xff;
   padded.set(raw, 1);
   const view = padded.subarray(1, 1 + raw.length);
-  assert.equal(webhookHmacHeader(SECRET, API_KEY, view), webhookHmacHeader(SECRET, API_KEY, raw));
-  assert.notEqual(webhookHmacHeader(SECRET, API_KEY, padded), webhookHmacHeader(SECRET, API_KEY, raw));
+  assert.equal(
+    webhookHmacHeader(SECRET, API_KEY, timestamp, view),
+    webhookHmacHeader(SECRET, API_KEY, timestamp, raw),
+  );
+  assert.notEqual(
+    webhookHmacHeader(SECRET, API_KEY, timestamp, padded),
+    webhookHmacHeader(SECRET, API_KEY, timestamp, raw),
+  );
   assert.equal(sha256Hex(view), sha256Hex(raw));
   assert.notEqual(sha256Hex(padded), sha256Hex(raw));
 });

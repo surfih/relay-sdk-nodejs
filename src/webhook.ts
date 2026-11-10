@@ -20,8 +20,9 @@ import {
  * Treat it as attacker-controlled. Dedupe on the signed pair `(event_id, attempt)` as well
  * as on the idempotency key. A swapped `Idempotency-Key` still verifies.
  *
- * `now` returns milliseconds since the Unix epoch (`Date.now`). It is used only when
- * `deliveryPublicKeyPem` is set. HMAC-only deliveries have no timestamp check.
+ * `now` returns milliseconds since the Unix epoch (`Date.now`). It is used for the required
+ * `X-Timestamp` skew check (±300 s) and, when `deliveryPublicKeyPem` is set, for
+ * `X-Event-Timestamp` as well.
  */
 export interface VerifyWebhookOptions {
   apiKey: string;
@@ -46,9 +47,10 @@ export interface VerifiedWebhook<T extends JsonValue = JsonValue> {
 /**
  * Verify a relay → webhook delivery.
  *
- * Order: required headers, constant-time API key compare, HMAC over `apiKey + "." + rawBody`
- * (three updates), optional Ed25519 delivery signature and ±300s skew, then JSON parse,
- * then `event_id` / `queue_id` / `attempt` against the signed headers.
+ * Order: required headers (including `X-Timestamp`), constant-time API key compare,
+ * reject `|now - X-Timestamp| > 300`, HMAC over `apiKey + "." + timestamp + "." + rawBody`
+ * (five updates), optional Ed25519 delivery signature and ±300s skew on `X-Event-Timestamp`,
+ * then JSON parse, then `event_id` / `queue_id` / `attempt` against the signed headers.
  *
  * `Idempotency-Key` is unsigned. Dedupe on `(event_id, attempt)` too. If a header value is a
  * `string[]` whose length is not 1, verification fails.
@@ -60,8 +62,10 @@ export function verifyWebhook<T extends JsonValue = JsonValue>(
   const secret = assertSecret(options.secret);
   const rawBody = rawBodyBytes(options.rawBody);
   const headers = options.headers;
+  const now = options.now ?? Date.now;
 
   const headerApiKey = readWebhookHeader(headers, "x-api-key");
+  const timestamp = readWebhookHeader(headers, "x-timestamp");
   const payloadSignature = readWebhookHeader(headers, "x-payload-signature");
   const idempotencyKey = readWebhookHeader(headers, "idempotency-key");
   const eventId = readWebhookHeader(headers, "x-event-id");
@@ -72,13 +76,15 @@ export function verifyWebhook<T extends JsonValue = JsonValue>(
     throw new WebhookVerificationError("signature");
   }
 
-  const expected = webhookHmacHeader(secret, apiKey, rawBody);
+  assertFreshUnixTimestamp(timestamp, now);
+
+  const expected = webhookHmacHeader(secret, apiKey, timestamp, rawBody);
   if (!timingSafeEqualText(expected, payloadSignature)) {
     throw new WebhookVerificationError("signature");
   }
 
   if (options.deliveryPublicKeyPem !== undefined) {
-    verifyDelivery(options.deliveryPublicKeyPem, headers, rawBody, eventId, options.now ?? Date.now);
+    verifyDelivery(options.deliveryPublicKeyPem, headers, rawBody, eventId, now);
   }
 
   let parsed: unknown;
@@ -99,6 +105,28 @@ export function verifyWebhook<T extends JsonValue = JsonValue>(
     queueId,
     attempt: parsed.attempt,
   };
+}
+
+function assertFreshUnixTimestamp(timestamp: string, now: () => number): void {
+  if (!/^[0-9]+$/.test(timestamp) || timestamp.length > 16) {
+    throw new WebhookVerificationError("timestamp");
+  }
+  const ts = Number(timestamp);
+  if (!Number.isSafeInteger(ts)) throw new WebhookVerificationError("timestamp");
+
+  let nowMs: number;
+  try {
+    nowMs = now();
+  } catch {
+    throw new WebhookVerificationError("timestamp");
+  }
+  if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
+    throw new WebhookVerificationError("timestamp");
+  }
+  const nowSeconds = Math.floor(nowMs / 1000);
+  if (!Number.isSafeInteger(nowSeconds) || Math.abs(nowSeconds - ts) > TIMESTAMP_SKEW_SECONDS) {
+    throw new WebhookVerificationError("timestamp");
+  }
 }
 
 function verifyDelivery(
