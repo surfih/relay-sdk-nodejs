@@ -1,6 +1,6 @@
 {
   "name": "relay-surfih-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "description": "Signed client and webhook verifier for the Relay /api/v1 HTTP API",
   "type": "module",
